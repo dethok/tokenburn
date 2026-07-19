@@ -172,6 +172,8 @@ func shouldShowETA(_ eta: Date?, resetsAt: Date?) -> Bool {
 
 let etaTooltip = "Projected time your session limit reaches 100% at the current burn rate (based on the last 45 minutes). Shown only when that would happen before the session resets."
 
+let paceOkTooltip = "At the current burn rate you won't hit the session limit before it resets — nothing to worry about."
+
 
 // MARK: - Components
 
@@ -736,8 +738,15 @@ struct PopoverContentView: View {
     let model: UsageModel
     @Environment(\.colorScheme) private var colorScheme
 
-    private enum Tab { case limits, insights }
-    @State private var selectedTab: Tab = .limits
+    // Not private: AppDelegate's debug auto-open (TOKENBURN_DEBUG_TAB) picks a starting tab.
+    enum Tab { case limits, insights }
+    @State private var selectedTab: Tab
+
+    init(model: UsageModel, initialTab: Tab = .limits) {
+        self.model = model
+        _selectedTab = State(initialValue: initialTab)
+    }
+
     // Independent of InsightsView's own range picker — hero just reads the already-cached
     // per-range aggregate for its headline $ figure.
     @State private var heroRange: InsightsRange = .all
@@ -923,22 +932,38 @@ struct PopoverContentView: View {
                     .monospacedDigit()
                     .lineLimit(2)
                     .foregroundStyle(Color.textMuted(colorScheme))
-                if sessionWindow != nil, let eta = model.sessionETA, shouldShowETA(eta, resetsAt: w.resetsAt) {
-                    // Short form ("caps ~HH:mm") — "at this pace," doesn't fit the 120pt column
-                    // and truncated with an ellipsis; the ⓘ-adjacent pace context is obvious
-                    // without it. Verified: all HH:mm boundary values render at the same 67pt
-                    // (monospaced digits), comfortably under the column. Suppressed entirely when
-                    // the projection would land after the window's own reset — impossible.
-                    HStack(spacing: 3) {
-                        Text("caps ~\(hhmmFormatter.string(from: eta))")
-                            .font(.system(size: 11))
-                            .monospacedDigit()
-                            .lineLimit(1)
-                            .foregroundStyle(Color.textMuted(colorScheme))
-                        Image(systemName: "info.circle")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color.textMuted(colorScheme))
-                            .help(etaTooltip)
+                if sessionWindow != nil {
+                    if let eta = model.sessionETA, shouldShowETA(eta, resetsAt: w.resetsAt) {
+                        // Short form ("caps ~HH:mm") — "at this pace," doesn't fit the 120pt column
+                        // and truncated with an ellipsis; the ⓘ-adjacent pace context is obvious
+                        // without it. Verified: all HH:mm boundary values render at the same 67pt
+                        // (monospaced digits), comfortably under the column.
+                        HStack(spacing: 3) {
+                            Text("caps ~\(hhmmFormatter.string(from: eta))")
+                                .font(.system(size: 11))
+                                .monospacedDigit()
+                                .lineLimit(1)
+                                .foregroundStyle(Color.textMuted(colorScheme))
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.textMuted(colorScheme))
+                                .help(etaTooltip)
+                        }
+                    } else {
+                        // Projection lands after reset (or slope too flat to project at all) —
+                        // positive state instead of nothing.
+                        HStack(spacing: 3) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10))
+                            Text("well within pace")
+                                .font(.system(size: 11))
+                                .lineLimit(1)
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.textMuted(colorScheme))
+                                .help(paceOkTooltip)
+                        }
+                        .foregroundStyle(Color.statusGreen.opacity(0.7))
                     }
                 }
             } else {
@@ -1171,7 +1196,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         effectView.layer?.cornerRadius = 16
         effectView.layer?.masksToBounds = true
 
-        hostingView = NSHostingView(rootView: PopoverContentView(model: model))
+        // ponytail: env-only, screenshot-automation hook — not a user preference, so no UI for it.
+        let initialTab: PopoverContentView.Tab = ProcessInfo.processInfo.environment["TOKENBURN_DEBUG_TAB"] == "insights" ? .insights : .limits
+        hostingView = NSHostingView(rootView: PopoverContentView(model: model, initialTab: initialTab))
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         effectView.addSubview(hostingView)
         NSLayoutConstraint.activate([

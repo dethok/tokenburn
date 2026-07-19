@@ -49,10 +49,11 @@ if CommandLine.arguments.contains("--selftest") {
 
     let earlierReset = now.addingTimeInterval(3600)
     let etaPastReset = now.addingTimeInterval(7200)
-    check("shouldShowETA is false when the projected cap lands after the window's reset", shouldShowETA(etaPastReset, resetsAt: earlierReset) == false)
+    check("state selection picks 'well within pace' when the projected cap lands after the window's reset", shouldShowETA(etaPastReset, resetsAt: earlierReset) == false)
     let laterReset = now.addingTimeInterval(7200)
     let etaBeforeReset = now.addingTimeInterval(3600)
-    check("shouldShowETA is true when the projected cap lands before the window's reset", shouldShowETA(etaBeforeReset, resetsAt: laterReset) == true)
+    check("state selection picks 'caps ~HH:mm' when the projected cap lands before the window's reset", shouldShowETA(etaBeforeReset, resetsAt: laterReset) == true)
+    check("state selection picks 'well within pace' when slope is too flat to project (no eta)", shouldShowETA(nil, resetsAt: laterReset) == false)
 
     exit(failures == 0 ? 0 : 1)
 }
