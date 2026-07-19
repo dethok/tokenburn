@@ -1,0 +1,25 @@
+# STAGED, NOT ACTIVE: move this file to .github/workflows/build.yml to enable it.
+# Left here instead of .github/workflows/ because the `gh` token used to create/push this repo
+# does not have the `workflow` OAuth scope — pushing straight to .github/workflows/ fails with
+# "refusing to allow an OAuth App to create or update workflow" until that scope is granted
+# (Ted needs to re-auth `gh` with the workflow scope, or add this file via the GitHub web UI).
+#
+# Runner note (verified 2026-07-20 against github.com/actions/runner-images): `macos-26` is a
+# GA hosted runner label (not beta), so this targets it directly — .glassEffect/Glass.clear need
+# the macOS 26 SDK, which macos-15 (the current macos-latest) does not have and will fail to
+# compile the app.
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift build
+        run: swift build -c release
+      - name: selftest
+        run: .build/release/TokenBurn --selftest
