@@ -163,6 +163,15 @@ func paceTooltip(windowDays: Double = 7) -> String {
     return "Grey line = theoretical even pace: where usage would sit if spent uniformly over the \(label) window. Under pace = burning slower than even; ahead = faster."
 }
 
+/// Only show the pace-cap projection when it lands before the window's own reset — a projected
+/// cap AFTER the reset is impossible (the window resets first).
+func shouldShowETA(_ eta: Date?, resetsAt: Date?) -> Bool {
+    guard let eta, let resetsAt else { return false }
+    return eta < resetsAt
+}
+
+let etaTooltip = "Projected time your session limit reaches 100% at the current burn rate (based on the last 45 minutes). Shown only when that would happen before the session resets."
+
 
 // MARK: - Components
 
@@ -269,33 +278,6 @@ private struct BarView: View {
         }
         .onChange(of: pct) { _, newValue in
             withAnimation(fillSpring) { animatedPct = newValue }
-        }
-    }
-}
-
-/// Session-row-specific sparkline: session% samples since the current 5h window began.
-private struct SessionSparkline: View {
-    let samples: [UsageSample]
-    let color: Color
-
-    var body: some View {
-        Canvas { context, size in
-            guard samples.count >= 2 else { return }
-            let minTs = samples.first!.ts.timeIntervalSinceReferenceDate
-            let maxTs = samples.last!.ts.timeIntervalSinceReferenceDate
-            let span = max(maxTs - minTs, 1)
-            func point(_ s: UsageSample) -> CGPoint {
-                let x = CGFloat((s.ts.timeIntervalSinceReferenceDate - minTs) / span) * size.width
-                let y = size.height - CGFloat(min(max(s.sessionPct, 0), 100) / 100) * size.height
-                return CGPoint(x: x, y: y)
-            }
-            var path = Path()
-            path.move(to: point(samples[0]))
-            for s in samples.dropFirst() { path.addLine(to: point(s)) }
-            context.stroke(path, with: .color(color), lineWidth: 1.5)
-
-            let last = point(samples[samples.count - 1])
-            context.fill(Path(ellipseIn: CGRect(x: last.x - 2, y: last.y - 2, width: 4, height: 4)), with: .color(.white))
         }
     }
 }
@@ -756,6 +738,9 @@ struct PopoverContentView: View {
 
     private enum Tab { case limits, insights }
     @State private var selectedTab: Tab = .limits
+    // Independent of InsightsView's own range picker — hero just reads the already-cached
+    // per-range aggregate for its headline $ figure.
+    @State private var heroRange: InsightsRange = .all
 
     private var sessionWindow: UsageWindow? {
         model.windows.first { $0.id == "session" || $0.id == "five_hour" }
@@ -787,7 +772,6 @@ struct PopoverContentView: View {
         VStack(alignment: .leading, spacing: 14) {
             headerRow
             heroRow
-            sessionSparklineStrip
             tabRow
             switch selectedTab {
             case .limits:
@@ -807,6 +791,7 @@ struct PopoverContentView: View {
         // effectView already clips this to the panel's rounded corners.
         .background(Color.black.opacity(glassTint))
         .onAppear { Task { await model.refreshOnPopoverOpen() } }
+        .task(id: heroRange) { await model.loadInsights(for: heroRange) }
     }
 
     // MARK: Header
@@ -848,11 +833,16 @@ struct PopoverContentView: View {
 
     private var heroLeft: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("API-equivalent · all time")
+            Text(heroCaption)
                 .font(.system(size: 12))
                 .lineLimit(1)
                 .foregroundStyle(Color.textMuted(colorScheme))
             costDisplay
+            HStack(spacing: 6) {
+                ForEach(InsightsRange.allCases, id: \.self) { r in
+                    RangePill(title: r.label, isActive: heroRange == r) { heroRange = r }
+                }
+            }
             if let today = model.todayCostUSD, today > 0 {
                 Text("today \(money(today))")
                     .font(.system(size: 11))
@@ -873,9 +863,24 @@ struct PopoverContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    // All → the model's running total (unscoped scan); 7D/30D → the matching cached Insights
+    // aggregate, already computed for the Insights tab — hero just reads it, lazily loaded via
+    // .task(id: heroRange) so switching pills doesn't re-scan anything.
+    private var heroCost: Double? {
+        heroRange == .all ? model.costUSD : model.insightsByRange[heroRange]?.rangeTotal
+    }
+
+    private var heroCaption: String {
+        switch heroRange {
+        case .all: return "API-equivalent · all time"
+        case .last30: return "· last 30 days"
+        case .last7: return "· last 7 days"
+        }
+    }
+
     @ViewBuilder
     private var costDisplay: some View {
-        if let cost = model.costUSD {
+        if let cost = heroCost {
             // "$" and the numeral composed as one Text via string interpolation so they share a
             // real baseline (was a hand-tuned .baselineOffset guess that left a floating gap).
             // Verified worst case "$99,999" (110pt numeral + 10pt sign) fits the 184pt column at
@@ -918,16 +923,23 @@ struct PopoverContentView: View {
                     .monospacedDigit()
                     .lineLimit(2)
                     .foregroundStyle(Color.textMuted(colorScheme))
-                if sessionWindow != nil, let eta = model.sessionETA {
+                if sessionWindow != nil, let eta = model.sessionETA, shouldShowETA(eta, resetsAt: w.resetsAt) {
                     // Short form ("caps ~HH:mm") — "at this pace," doesn't fit the 120pt column
                     // and truncated with an ellipsis; the ⓘ-adjacent pace context is obvious
                     // without it. Verified: all HH:mm boundary values render at the same 67pt
-                    // (monospaced digits), comfortably under the column.
-                    Text("caps ~\(hhmmFormatter.string(from: eta))")
-                        .font(.system(size: 11))
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .foregroundStyle(Color.textMuted(colorScheme))
+                    // (monospaced digits), comfortably under the column. Suppressed entirely when
+                    // the projection would land after the window's own reset — impossible.
+                    HStack(spacing: 3) {
+                        Text("caps ~\(hhmmFormatter.string(from: eta))")
+                            .font(.system(size: 11))
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .foregroundStyle(Color.textMuted(colorScheme))
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color.textMuted(colorScheme))
+                            .help(etaTooltip)
+                    }
                 }
             } else {
                 HeroRingGauge(pct: 0).opacity(0.3)
@@ -935,23 +947,6 @@ struct PopoverContentView: View {
         }
         // Fixed width, no layoutPriority — this is what was starving heroLeft.
         .frame(width: 120, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private var sessionSparklineStrip: some View {
-        if model.sessionSparkline.count >= 3 {
-            ZStack(alignment: .leading) {
-                SessionSparkline(
-                    samples: model.sessionSparkline,
-                    color: heroRingWindow.map { hue(for: Int($0.utilization.rounded())) } ?? Color.textMuted(colorScheme)
-                )
-                // Micro-label so the strip reads as "session pace over time", not a stray line.
-                Text("session · 5h")
-                    .font(.system(size: 9))
-                    .foregroundStyle(Color.textMuted(colorScheme))
-            }
-            .frame(height: 16)
-        }
     }
 
     // MARK: Claude section
@@ -1033,19 +1028,30 @@ struct PopoverContentView: View {
                     isFetching: model.isFetching,
                     onRefresh: { Task { await model.manualRefresh() } }
                 )
-                // Same mini-card style as Claude's weekly tiles — 2-col grid; a single window
-                // just occupies one half-width cell, no more full-width row style anywhere.
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible())], spacing: 10) {
-                    ForEach(model.codexWindows) { w in
-                        // Weekly = 7d window, session (5h) = 5h window; same expectedPct math,
-                        // just a different period. Unknown window lengths get no pace marker.
-                        MiniCard(
-                            label: w.label.lowercased(),
-                            pct: Int(w.usedPercent.rounded()),
-                            resetsAt: w.resetsAt,
-                            expected: codexExpectedPct(for: w),
-                            paceWindowDays: w.label == "Session (5h)" ? 5.0 / 24.0 : 7
-                        )
+                // Same mini-card style as Claude's weekly tiles. The usual case is a single
+                // (weekly) window — spans the full panel width instead of sitting half-width
+                // and alone in a 2-col grid. 2+ windows keep the 2-col grid.
+                if model.codexWindows.count == 1, let w = model.codexWindows.first {
+                    MiniCard(
+                        label: w.label.lowercased(),
+                        pct: Int(w.usedPercent.rounded()),
+                        resetsAt: w.resetsAt,
+                        expected: codexExpectedPct(for: w),
+                        paceWindowDays: w.label == "Session (5h)" ? 5.0 / 24.0 : 7
+                    )
+                } else {
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible())], spacing: 10) {
+                        ForEach(model.codexWindows) { w in
+                            // Weekly = 7d window, session (5h) = 5h window; same expectedPct math,
+                            // just a different period. Unknown window lengths get no pace marker.
+                            MiniCard(
+                                label: w.label.lowercased(),
+                                pct: Int(w.usedPercent.rounded()),
+                                resetsAt: w.resetsAt,
+                                expected: codexExpectedPct(for: w),
+                                paceWindowDays: w.label == "Session (5h)" ? 5.0 / 24.0 : 7
+                            )
+                        }
                     }
                 }
             }

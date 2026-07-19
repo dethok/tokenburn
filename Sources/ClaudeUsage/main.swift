@@ -47,6 +47,13 @@ if CommandLine.arguments.contains("--selftest") {
     check("expectedPct at exactly mid-window (3.5d left of 7d) == 50", expectedPct(resetsAt: midWindowReset, now: now).map { abs($0 - 50) < 0.01 } ?? false)
     check("expectedPct is nil for a nil resetsAt", expectedPct(resetsAt: nil, now: now) == nil)
 
+    let earlierReset = now.addingTimeInterval(3600)
+    let etaPastReset = now.addingTimeInterval(7200)
+    check("shouldShowETA is false when the projected cap lands after the window's reset", shouldShowETA(etaPastReset, resetsAt: earlierReset) == false)
+    let laterReset = now.addingTimeInterval(7200)
+    let etaBeforeReset = now.addingTimeInterval(3600)
+    check("shouldShowETA is true when the projected cap lands before the window's reset", shouldShowETA(etaBeforeReset, resetsAt: laterReset) == true)
+
     exit(failures == 0 ? 0 : 1)
 }
 
