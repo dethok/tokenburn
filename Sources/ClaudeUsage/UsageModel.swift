@@ -391,6 +391,14 @@ final class UsageModel {
         windows.map { Int($0.utilization.rounded()) }.max()
     }
 
+    var sessionUtilization: Int? {
+        windows.first { $0.id == "session" || $0.id == "five_hour" }.map { Int($0.utilization.rounded()) }
+    }
+
+    /// Menu bar gauge source: session (5h) window when available, else the worst window — matches
+    /// the hero ring's own fallback chain.
+    var gaugePct: Int? { sessionUtilization ?? worstUtilization }
+
     private var minutesSinceSuccess: Double? {
         guard let d = lastFetchDate else { return nil }
         return Date().timeIntervalSince(d) / 60
@@ -403,27 +411,26 @@ final class UsageModel {
     /// No successful fetch yet this app run — only case where the full error state should show.
     var hasNeverSucceeded: Bool { lastFetchDate == nil }
 
-    /// Retained worstUtilization survives fetch failures, so this only reads "!" pre-first-fetch;
-    /// the ⚠ warning only appears once the last success itself is >10 min old.
+    /// Retained gaugePct survives fetch failures, so this only reads "!" pre-first-fetch; the ⚠
+    /// warning only appears once the last success itself is >10 min old.
     var menuBarTitle: String {
-        guard let worst = worstUtilization else { return "✳ !" }
-        return "✳ \(worst)%" + (isRecentlySucceeded ? "" : " ⚠")
+        guard let pct = gaugePct else { return "✳ !" }
+        return "✳ \(pct)%" + (isRecentlySucceeded ? "" : " ⚠")
     }
 
-    /// MenuBarExtra's label closure can't reliably render a live SwiftUI Canvas/Shape view (it
-    /// renders blank — known limitation), so the gauge is rasterized here instead and the label
-    /// just displays the resulting NSImage. Cached on worstUtilization to avoid re-rendering when
-    /// it hasn't actually changed.
+    /// The status item can't reliably render a live SwiftUI Canvas/Shape view directly, so the
+    /// gauge is rasterized here instead and displayed as a plain NSImage. Cached on gaugePct
+    /// (session % when available, else worst) to avoid re-rendering when it hasn't changed.
     private func updateGaugeImage() {
-        guard let worst = worstUtilization else {
+        guard let pct = gaugePct else {
             gaugeImage = nil
             lastRenderedGaugePct = nil
             return
         }
-        guard worst != lastRenderedGaugePct else { return }
-        lastRenderedGaugePct = worst
+        guard pct != lastRenderedGaugePct else { return }
+        lastRenderedGaugePct = pct
 
-        let renderer = ImageRenderer(content: MenuBarGaugeView(worst: worst).frame(width: 18, height: 18))
+        let renderer = ImageRenderer(content: MenuBarGaugeView(worst: pct).frame(width: 18, height: 18))
         renderer.scale = 2
         guard let cgImage = renderer.cgImage else { return }
         let image = NSImage(cgImage: cgImage, size: NSSize(width: 18, height: 18))

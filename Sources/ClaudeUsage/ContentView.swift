@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import ServiceManagement
+import Observation
 
 // MARK: - Design tokens
 
@@ -27,19 +28,28 @@ extension Color {
     static func textPrimary(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? .white.opacity(0.92) : .black.opacity(0.85)
     }
-    // ponytail: light-mode muted wasn't spec'd explicitly — kept the same primary:muted opacity
-    // ratio as dark mode (55/92 ≈ 0.6) rounded to a clean 50%.
+    // Bumped 0.55->0.70 dark / 0.50->0.62 light — too weak against the glass (GPT-5.5 review).
     static func textMuted(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? .white.opacity(0.55) : .black.opacity(0.50)
+        scheme == .dark ? .white.opacity(0.70) : .black.opacity(0.62)
     }
     // Shared neutral for bar tracks, divider hairlines, and badge-pill fills.
     static func hairline(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? .white.opacity(0.08) : .black.opacity(0.08)
     }
-    // Inset-well fill (mini-cards, active tab pill) — kept faint so it reads as a tonal layer on
-    // glass, not an opaque card.
+    // Inset-well fill (mini-cards) — kept faint so it reads as a tonal layer on glass, not an
+    // opaque card.
     static func well(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? .white.opacity(0.03) : .black.opacity(0.03)
+    }
+    // Segmented-control fill (tabs, range pills) — stronger than `well` so the selected segment
+    // actually reads as selected rather than a barely-there tint.
+    static func segmentFill(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? .white.opacity(0.12) : .black.opacity(0.10)
+    }
+    // Badge-chip fill (plan/status metadata pills) — reads as a chip, not disabled UI, paired
+    // with a `hairline` stroke.
+    static func badgeFill(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? .white.opacity(0.04) : .black.opacity(0.04)
     }
 }
 
@@ -75,6 +85,10 @@ func hue(for pct: Int) -> Color {
 
 /// Bouncy fill-in used by every animated bar/ring (bars, hero ring) — shared so they stay in sync.
 let fillSpring = Animation.spring(duration: 0.35, bounce: 0.35)
+
+/// Dark liquid glass tint over the NSVisualEffectView — tune here if the panel reads too milky
+/// (raise) or too opaque (lower). Kept in the 0.20-0.30 "smoked glass, not frosted" range.
+let glassTint: Double = 0.25
 
 private let hhmmFormatter: DateFormatter = {
     let f = DateFormatter()
@@ -132,54 +146,23 @@ func shortWindowName(_ w: UsageWindow) -> String {
     return w.label.lowercased()
 }
 
-/// Theoretical even-burn position within a 7-day weekly window ending at resetsAt, 0-100,
-/// clamped. elapsed = 7d - (resetsAt - now); exactly mid-window -> 50. nil if resetsAt is nil.
-func expectedPct(resetsAt: Date?, now: Date = Date()) -> Double? {
+/// Theoretical even-burn position within a `windowDays`-day window ending at resetsAt, 0-100,
+/// clamped. elapsed = window - (resetsAt - now); exactly mid-window -> 50. nil if resetsAt is nil.
+func expectedPct(resetsAt: Date?, windowDays: Double = 7, now: Date = Date()) -> Double? {
     guard let resetsAt else { return nil }
-    let totalWindow = 7.0 * 86400
+    let totalWindow = windowDays * 86400
     let remaining = resetsAt.timeIntervalSince(now)
     let elapsed = totalWindow - remaining
     return min(max(elapsed / totalWindow * 100, 0), 100)
 }
 
-/// MenuBarExtra(.window)'s hosting NSPanel backs itself opaque by default, which blocks the
-/// desktop/glass from showing through no matter what material/glass effect is applied above it.
-/// Clearing the window's own opacity/background is what lets real translucency read through.
-/// This is now a plain 0-opacity NSView (not NSVisualEffectView) so it renders nothing itself and
-/// cannot occlude .glassEffect's own background — its only job is the window walk below. Liquid
-/// Glass's own window setup can reset isOpaque/backgroundColor after attach, so re-assert once
-/// more async on the next run loop turn as a cheap belt-and-suspenders.
-private final class TransparentVisualEffectView: NSView {
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        applyWindowTransparency(phase: "sync")
-        DispatchQueue.main.async { [weak self] in self?.applyWindowTransparency(phase: "async") }
-    }
-
-    private func applyWindowTransparency(phase: String) {
-        guard let window else { return }
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        // ponytail: diagnostic only, for the next round if glass still doesn't show — logs the
-        // class names of whatever sits alongside the SwiftUI hosting view, in case one of them
-        // is an opaque backing view occluding the glass from underneath.
-        if let siblings = window.contentView?.superview?.subviews {
-            let names = siblings.map { String(describing: type(of: $0)) }.joined(separator: ", ")
-            EventLog.append(source: "window", ok: true, detail: "\(phase) contentView.superview subviews: [\(names)]")
-        }
-    }
+// ponytail: only two window lengths exist anywhere in this app (5h session, 7d weekly) — a
+// >=1-day heuristic is exact for both without needing to thread windowDays through every caller.
+func paceTooltip(windowDays: Double = 7) -> String {
+    let label = windowDays < 1 ? "5-hour" : "7-day"
+    return "Grey line = theoretical even pace: where usage would sit if spent uniformly over the \(label) window. Under pace = burning slower than even; ahead = faster."
 }
 
-/// 0-opacity 1x1 probe — no visual footprint of its own, exists only to trigger the window-
-/// clearing hook above without participating in (or occluding) the glass effect's background.
-private struct VisualEffectBackground: NSViewRepresentable {
-    func makeNSView(context: Context) -> TransparentVisualEffectView {
-        let view = TransparentVisualEffectView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
-        view.alphaValue = 0
-        return view
-    }
-    func updateNSView(_ nsView: TransparentVisualEffectView, context: Context) {}
-}
 
 // MARK: - Components
 
@@ -199,6 +182,26 @@ private struct ResetLabel: View {
             }
             .font(.system(size: size))
             .foregroundStyle(Color.textMuted(colorScheme))
+        }
+    }
+}
+
+/// 45° diagonal hatching, ~1pt lines 3.5pt apart — draws over whatever frame it's given. Static
+/// (no animation), so it respects reduced-motion trivially by construction.
+private struct HatchOverlay: View {
+    let colorScheme: ColorScheme
+
+    var body: some View {
+        Canvas { context, size in
+            let lineColor = colorScheme == .dark ? Color.white.opacity(0.28) : Color.black.opacity(0.25)
+            var x = -size.height
+            while x < size.width {
+                var path = Path()
+                path.move(to: CGPoint(x: x, y: size.height))
+                path.addLine(to: CGPoint(x: x + size.height, y: 0))
+                context.stroke(path, with: .color(lineColor), lineWidth: 1)
+                x += 3.5
+            }
         }
     }
 }
@@ -235,6 +238,22 @@ private struct BarView: View {
                     .frame(width: fillWidth)
                     .clipShape(Capsule())
                 if let paceMarkerPct {
+                    // Hatch spans the GAP between the actual fill and the pace line — the unused
+                    // pace allowance — only when under pace (pace > actual). The filled portion
+                    // itself stays solid hue with no hatching; ahead of pace, no hatching at all.
+                    // Static (final pct, not animatedPct) — no motion to respect.
+                    if paceMarkerPct > Double(pct) {
+                        let startFraction = CGFloat(pct) / 100
+                        let endFraction = CGFloat(min(paceMarkerPct, 100)) / 100
+                        HatchOverlay(colorScheme: colorScheme)
+                            .frame(width: geo.size.width, height: height)
+                            .mask(alignment: .leading) {
+                                Rectangle()
+                                    .frame(width: geo.size.width * (endFraction - startFraction), height: height)
+                                    .offset(x: geo.size.width * startFraction)
+                            }
+                            .clipShape(Capsule())
+                    }
                     // Static even-burn reference line — not tied to the fill's own animation.
                     Rectangle()
                         .fill(colorScheme == .dark ? Color.white.opacity(0.35) : Color.black.opacity(0.30))
@@ -250,34 +269,6 @@ private struct BarView: View {
         }
         .onChange(of: pct) { _, newValue in
             withAnimation(fillSpring) { animatedPct = newValue }
-        }
-    }
-}
-
-/// Full-width row: label + colored %, capsule bar, reset line. Used for every Codex window.
-private struct PrimaryRow: View {
-    let label: String
-    let pct: Int
-    let resetsAt: Date?
-    @Environment(\.colorScheme) private var colorScheme
-    private var color: Color { hue(for: pct) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(label)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.textPrimary(colorScheme))
-                Spacer()
-                Text("\(pct)%")
-                    .font(.system(size: 15, weight: .semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(color)
-                    .contentTransition(.numericText(value: Double(pct)))
-                    .animation(.default, value: pct)
-            }
-            BarView(pct: pct, color: color, height: 10)
-            ResetLabel(date: resetsAt, size: 12)
         }
     }
 }
@@ -309,63 +300,25 @@ private struct SessionSparkline: View {
     }
 }
 
-/// Full-width Claude session row: %, bar, "NN% left · resets..." line, optional pace ETA line,
-/// optional sparkline (session% since the current 5h window began).
-private struct SessionRow: View {
-    let pct: Int
-    let resetsAt: Date?
-    let eta: Date?
-    let sparkline: [UsageSample]
-    @Environment(\.colorScheme) private var colorScheme
-    private var color: Color { hue(for: pct) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("session")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.textPrimary(colorScheme))
-                Spacer()
-                Text("\(pct)%")
-                    .font(.system(size: 15, weight: .semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(color)
-                    .contentTransition(.numericText(value: Double(pct)))
-                    .animation(.default, value: pct)
-            }
-            BarView(pct: pct, color: color, height: 10)
-            Text(sessionResetLine(pct: pct, resetsAt: resetsAt))
-                .font(.system(size: 12))
-                .monospacedDigit()
-                .foregroundStyle(Color.textMuted(colorScheme))
-            if let eta {
-                Text("at this pace, caps ~\(hhmmFormatter.string(from: eta))")
-                    .font(.system(size: 12))
-                    .monospacedDigit()
-                    .foregroundStyle(Color.textMuted(colorScheme))
-            }
-            if sparkline.count >= 3 {
-                SessionSparkline(samples: sparkline, color: color)
-                    .frame(height: 16)
-            }
-        }
-    }
-}
-
-/// Borderless "inset well" mini-card for the secondary Claude windows grid.
+/// Borderless "inset well" mini-card — the ONE tile style for both Claude weekly windows and
+/// Codex windows (2-col grid; a lone window naturally occupies one half-width cell). Same pace
+/// marker/hatch/label treatment either way, since both route through this one component now.
 private struct MiniCard: View {
     let label: String
     let pct: Int
     let resetsAt: Date?
-    var expected: Double? // weekly tiles only — nil disables the pace marker/label entirely
+    var expected: Double?          // nil disables the pace marker/label entirely
+    var paceWindowDays: Double = 7 // for the tooltip's wording only
     @Environment(\.colorScheme) private var colorScheme
     private var color: Color { hue(for: pct) }
 
+    // ahead = amber, under = muted green (still burning, just slower than even), on-pace = plain
+    // muted. Same semantics for Claude and Codex since there's only one paceLabel now.
     private var paceLabel: (text: String, color: Color)? {
         guard let expected else { return nil }
         let diff = Double(pct) - expected
         if diff > 3 { return ("\(Int(diff.rounded()))% ahead of pace", .statusAmber) }
-        if diff < -3 { return ("\(Int(abs(diff).rounded()))% under pace", Color.textMuted(colorScheme)) }
+        if diff < -3 { return ("\(Int(abs(diff).rounded()))% under pace", Color.statusGreen.opacity(0.7)) }
         return ("on pace", Color.textMuted(colorScheme))
     }
 
@@ -384,19 +337,29 @@ private struct MiniCard: View {
                     .animation(.default, value: pct)
             }
             BarView(pct: pct, color: color, height: 6, paceMarkerPct: expected)
-            ResetLabel(date: resetsAt, size: 11)
+            // lineLimit 2 — verified real-data worst case ("resets Wed 23:59 · in 7d") overflows a
+            // single line at this card's width by ~6pt but wraps cleanly into 2 with margin to
+            // spare, so this fixes the actual truncation risk without needing minimumScaleFactor.
+            ResetLabel(date: resetsAt, size: 11, lineLimit: 2)
             if let paceLabel {
-                Text(paceLabel.text)
-                    .font(.system(size: 10))
-                    .foregroundStyle(paceLabel.color)
+                HStack(spacing: 3) {
+                    Text(paceLabel.text)
+                        .font(.system(size: 10))
+                        .foregroundStyle(paceLabel.color)
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.textMuted(colorScheme))
+                        .help(paceTooltip(windowDays: paceWindowDays))
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .padding(10)
         // Fixed height (not content-driven) so two cards with differently-long labels/reset text
         // in the same grid row still render the same size — width already matches via the grid's
-        // equal-flexible columns. Bumped 80->96 to fit the pace label line on weekly tiles.
-        .frame(height: 96, alignment: .top)
+        // equal-flexible columns. 80->96 fit the pace label line; 96->106 (real font-metrics
+        // check: row+bar+2-line-reset+pace = 98pt) covers the reset label's new 2-line wrap.
+        .frame(height: 106, alignment: .top)
         .background(Color.well(colorScheme))
         .overlay(alignment: .top) {
             Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
@@ -426,19 +389,32 @@ private struct SectionHeader: View {
                     .foregroundStyle(Color.textMuted(colorScheme))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.hairline(colorScheme)))
+                    .background(
+                        Capsule()
+                            .fill(Color.badgeFill(colorScheme))
+                            .overlay(Capsule().stroke(Color.hairline(colorScheme), lineWidth: 1))
+                    )
             }
             Spacer()
+            // Refresh + status merged into one tappable element — a spinner replaces the bullet
+            // while fetching, the live/stale/retrying text stays either way. Verified real-data
+            // width (worst case "retrying (as of HH:mm)") fits the header row with margin.
             Button(action: onRefresh) {
-                Image(systemName: "arrow.clockwise")
-                    .foregroundStyle(Color.textMuted(colorScheme))
-                    .rotationEffect(.degrees(isFetching ? 360 : 0))
-                    .animation(isFetching ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: isFetching)
-            }
-            .buttonStyle(.plain)
-            Text("• \(statusText)")
+                HStack(spacing: 4) {
+                    if isFetching {
+                        Image(systemName: "arrow.clockwise")
+                            .rotationEffect(.degrees(isFetching ? 360 : 0))
+                            .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: isFetching)
+                    } else {
+                        Text("•")
+                    }
+                    Text(statusText)
+                        .lineLimit(1)
+                }
                 .font(.system(size: 12))
                 .foregroundStyle(statusColor)
+            }
+            .buttonStyle(.plain)
         }
     }
 }
@@ -456,7 +432,7 @@ private struct TabPill: View {
                 .foregroundStyle(isActive ? Color.textPrimary(colorScheme) : Color.textMuted(colorScheme))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
-                .background(isActive ? Color.well(colorScheme) : Color.clear)
+                .background(isActive ? Color.segmentFill(colorScheme) : Color.clear)
                 .clipShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -497,6 +473,18 @@ private struct HeroRingGauge: View {
     @State private var animatedPct: Int = 0
     private var color: Color { hue(for: pct) }
 
+    // "%" reads as a superscripted unit — smaller, baseline-raised — while the numeral keeps the
+    // full serif size. Composed via Text string interpolation (the `+` concatenation operator is
+    // deprecated as of macOS 26).
+    private var numeral: Text {
+        Text("\(pct)").font(.system(size: 23, weight: .semibold, design: .serif))
+    }
+    private var percentSign: Text {
+        Text("%")
+            .font(.system(size: 23 * 0.55, weight: .semibold, design: .serif))
+            .baselineOffset(8)
+    }
+
     var body: some View {
         ZStack {
             Circle().stroke(Color.hairline(colorScheme), lineWidth: 7)
@@ -504,8 +492,7 @@ private struct HeroRingGauge: View {
                 .trim(from: 0, to: CGFloat(min(max(animatedPct, 0), 100)) / 100)
                 .stroke(color, style: StrokeStyle(lineWidth: 7, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-            Text("\(pct)%")
-                .font(.system(size: 23, weight: .semibold, design: .serif))
+            Text("\(numeral)\(percentSign)")
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .foregroundStyle(color)
@@ -535,7 +522,7 @@ private struct RangePill: View {
                 .foregroundStyle(isActive ? Color.textPrimary(colorScheme) : Color.textMuted(colorScheme))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
-                .background(isActive ? Color.well(colorScheme) : Color.clear)
+                .background(isActive ? Color.segmentFill(colorScheme) : Color.clear)
                 .clipShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -627,14 +614,20 @@ private struct InsightsView: View {
                     .monospacedDigit()
                     .foregroundStyle(Color.textMuted(colorScheme))
             }
-            HStack(alignment: .bottom, spacing: 3) {
-                ForEach(days) { d in
-                    Capsule()
-                        .fill(d.day == todayKey ? Color.white : Color.statusGreen)
-                        .frame(height: max(2, 40 * CGFloat(d.costUSD / maxCost)))
+            GeometryReader { geo in
+                // Cap bar width so a handful of buckets (7D) don't stretch into wide blobs;
+                // center the row instead of letting the HStack force them to fill the width.
+                let barWidth = min(22, geo.size.width / CGFloat(max(days.count, 1)) - 3)
+                HStack(alignment: .bottom, spacing: 3) {
+                    ForEach(days) { d in
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(d.day == todayKey ? Color.white : Color.statusGreen)
+                            .frame(width: max(barWidth, 1), height: d.costUSD > 0 ? max(3, 40 * CGFloat(d.costUSD / maxCost)) : 1.5)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .center)
             }
-            .frame(height: 40, alignment: .bottom)
+            .frame(height: 40)
         }
     }
 
@@ -714,14 +707,18 @@ private struct InsightsView: View {
                     .monospacedDigit()
                     .foregroundStyle(Color.textMuted(colorScheme))
             }
-            HStack(alignment: .bottom, spacing: 3) {
-                ForEach(days) { d in
-                    Capsule()
-                        .fill(d.day == todayKey ? Color.white : Color.statusGreen)
-                        .frame(height: max(2, 40 * CGFloat(d.tokens) / CGFloat(maxTokens)))
+            GeometryReader { geo in
+                let barWidth = min(22, geo.size.width / CGFloat(max(days.count, 1)) - 3)
+                HStack(alignment: .bottom, spacing: 3) {
+                    ForEach(days) { d in
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(d.day == todayKey ? Color.white : Color.statusGreen)
+                            .frame(width: max(barWidth, 1), height: d.tokens > 0 ? max(3, 40 * CGFloat(d.tokens) / CGFloat(maxTokens)) : 1.5)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .center)
             }
-            .frame(height: 40, alignment: .bottom)
+            .frame(height: 40)
         }
     }
 
@@ -790,6 +787,7 @@ struct PopoverContentView: View {
         VStack(alignment: .leading, spacing: 14) {
             headerRow
             heroRow
+            sessionSparklineStrip
             tabRow
             switch selectedTab {
             case .limits:
@@ -802,12 +800,12 @@ struct PopoverContentView: View {
         }
         .padding(16)
         .frame(width: 360)
-        .glassEffect(.clear, in: .rect(cornerRadius: 16))
-        .containerBackground(.clear, for: .window)
-        .overlay(alignment: .topLeading) {
-            // 0-opacity 1x1 probe — window-clearing side effect only, cannot occlude the glass above.
-            VisualEffectBackground().frame(width: 1, height: 1)
-        }
+        // Dark liquid glass: the NSVisualEffectView (.hudWindow, forced darkAqua) beneath the
+        // NSHostingView does the actual behind-window blur; this is the ONE tint layer above it
+        // (no .glassEffect, no other .background — those compounded into a heavier, less
+        // transparent look than the VEV alone). AppKit's cornerRadius+masksToBounds on the
+        // effectView already clips this to the panel's rounded corners.
+        .background(Color.black.opacity(glassTint))
         .onAppear { Task { await model.refreshOnPopoverOpen() } }
     }
 
@@ -836,21 +834,30 @@ struct PopoverContentView: View {
 
     private var heroRow: some View {
         HStack(alignment: .top, spacing: 24) {
+            // Both columns stretch to the row's full (tallest-content) height, so they render as
+            // equal-height siblings; heroLeft's naturally top-down text stays top-aligned, while
+            // heroRight's caption/ring/reset/eta block centers as one optical unit within that
+            // same height instead of floating at the top.
             heroLeft
+                .frame(maxHeight: .infinity, alignment: .top)
             heroRight
+                .frame(maxHeight: .infinity, alignment: .center)
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var heroLeft: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("API-equivalent · all time")
                 .font(.system(size: 12))
+                .lineLimit(1)
                 .foregroundStyle(Color.textMuted(colorScheme))
             costDisplay
             if let today = model.todayCostUSD, today > 0 {
                 Text("today \(money(today))")
                     .font(.system(size: 11))
                     .monospacedDigit()
+                    .lineLimit(1)
                     .foregroundStyle(Color.textMuted(colorScheme))
             }
             HStack(spacing: 4) {
@@ -858,26 +865,31 @@ struct PopoverContentView: View {
                 Text("computed locally")
             }
             .font(.system(size: 11))
+            .lineLimit(1)
             .foregroundStyle(Color.textMuted(colorScheme))
         }
+        // Takes the remainder after heroRight's fixed width — was starved by heroRight's old
+        // .layoutPriority(1), crushing this column to "A…"/"$1"/"t…".
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
     private var costDisplay: some View {
         if let cost = model.costUSD {
-            HStack(alignment: .top, spacing: 2) {
-                Text("$")
-                    .font(.system(size: 20, weight: .semibold, design: .serif))
-                    .baselineOffset(14)
-                Text(Self.costFormatter.string(from: NSNumber(value: cost)) ?? "0")
-                    .font(.system(size: 40, weight: .semibold, design: .serif))
-                    .contentTransition(.numericText(value: cost))
-                    .animation(.default, value: cost)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-            }
-            .foregroundStyle(Color.textPrimary(colorScheme))
+            // "$" and the numeral composed as one Text via string interpolation so they share a
+            // real baseline (was a hand-tuned .baselineOffset guess that left a floating gap).
+            // Verified worst case "$99,999" (110pt numeral + 10pt sign) fits the 184pt column at
+            // full scale — minimumScaleFactor is a floor, not something this actually hits.
+            let dollarSign = Text("$")
+                .font(.system(size: 20, weight: .semibold, design: .serif))
+            let numeral = Text(Self.costFormatter.string(from: NSNumber(value: cost)) ?? "0")
+                .font(.system(size: 40, weight: .semibold, design: .serif))
+            Text("\(dollarSign)\(numeral)")
+                .contentTransition(.numericText(value: cost))
+                .animation(.default, value: cost)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .foregroundStyle(Color.textPrimary(colorScheme))
         } else {
             Text("computing…")
                 .font(.system(size: 14))
@@ -892,20 +904,54 @@ struct PopoverContentView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Session")
                 .font(.system(size: 12))
+                .lineLimit(1)
                 .foregroundStyle(Color.textMuted(colorScheme))
             if let w = heroRingWindow {
-                HeroRingGauge(pct: Int(w.utilization.rounded()))
-                Text(preciseResetLine(w.resetsAt))
+                let pct = Int(w.utilization.rounded())
+                HeroRingGauge(pct: pct)
+                // "NN% left" merged into the reset line; ETA line below — relocated here from the
+                // now-removed full-width session row (redundant with this ring). Verified real
+                // word-wrap: worst case "100% left · resets 23:59 · in 23h 59m" needs exactly 2
+                // lines at this column's width, both under it with margin.
+                Text(sessionResetLine(pct: pct, resetsAt: w.resetsAt))
                     .font(.system(size: 11))
                     .monospacedDigit()
                     .lineLimit(2)
                     .foregroundStyle(Color.textMuted(colorScheme))
+                if sessionWindow != nil, let eta = model.sessionETA {
+                    // Short form ("caps ~HH:mm") — "at this pace," doesn't fit the 120pt column
+                    // and truncated with an ellipsis; the ⓘ-adjacent pace context is obvious
+                    // without it. Verified: all HH:mm boundary values render at the same 67pt
+                    // (monospaced digits), comfortably under the column.
+                    Text("caps ~\(hhmmFormatter.string(from: eta))")
+                        .font(.system(size: 11))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .foregroundStyle(Color.textMuted(colorScheme))
+                }
             } else {
                 HeroRingGauge(pct: 0).opacity(0.3)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .layoutPriority(1)
+        // Fixed width, no layoutPriority — this is what was starving heroLeft.
+        .frame(width: 120, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var sessionSparklineStrip: some View {
+        if model.sessionSparkline.count >= 3 {
+            ZStack(alignment: .leading) {
+                SessionSparkline(
+                    samples: model.sessionSparkline,
+                    color: heroRingWindow.map { hue(for: Int($0.utilization.rounded())) } ?? Color.textMuted(colorScheme)
+                )
+                // Micro-label so the strip reads as "session pace over time", not a stray line.
+                Text("session · 5h")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color.textMuted(colorScheme))
+            }
+            .frame(height: 16)
+        }
     }
 
     // MARK: Claude section
@@ -943,14 +989,8 @@ struct PopoverContentView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Color.statusAmber)
             } else {
-                if let session = sessionWindow {
-                    SessionRow(
-                        pct: Int(session.utilization.rounded()),
-                        resetsAt: session.resetsAt,
-                        eta: model.sessionETA,
-                        sparkline: model.sessionSparkline
-                    )
-                }
+                // No more full-width session row here — redundant with the hero ring; its two
+                // info lines relocated into heroRight, sparkline into its own strip under hero.
                 if !remainingWindows.isEmpty {
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible())], spacing: 10) {
                         ForEach(remainingWindows) { w in
@@ -993,13 +1033,29 @@ struct PopoverContentView: View {
                     isFetching: model.isFetching,
                     onRefresh: { Task { await model.manualRefresh() } }
                 )
-                VStack(spacing: 12) {
+                // Same mini-card style as Claude's weekly tiles — 2-col grid; a single window
+                // just occupies one half-width cell, no more full-width row style anywhere.
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible())], spacing: 10) {
                     ForEach(model.codexWindows) { w in
-                        PrimaryRow(label: w.label.lowercased(), pct: Int(w.usedPercent.rounded()), resetsAt: w.resetsAt)
+                        // Weekly = 7d window, session (5h) = 5h window; same expectedPct math,
+                        // just a different period. Unknown window lengths get no pace marker.
+                        MiniCard(
+                            label: w.label.lowercased(),
+                            pct: Int(w.usedPercent.rounded()),
+                            resetsAt: w.resetsAt,
+                            expected: codexExpectedPct(for: w),
+                            paceWindowDays: w.label == "Session (5h)" ? 5.0 / 24.0 : 7
+                        )
                     }
                 }
             }
         }
+    }
+
+    private func codexExpectedPct(for w: CodexWindow) -> Double? {
+        if w.label == "Weekly" { return expectedPct(resetsAt: w.resetsAt, windowDays: 7) }
+        if w.label == "Session (5h)" { return expectedPct(resetsAt: w.resetsAt, windowDays: 5.0 / 24.0) }
+        return nil
     }
 
     // MARK: Footer
@@ -1018,16 +1074,16 @@ struct PopoverContentView: View {
                 }
                 .buttonStyle(.plain)
                 Spacer()
-                Button("quit") {
-                    NSApplication.shared.terminate(nil)
-                }
-                .buttonStyle(.plain)
                 Button("dethok") {
                     NSWorkspace.shared.open(URL(string: "https://dethok.github.io")!)
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 9))
                 .foregroundStyle(Color.textMuted(colorScheme).opacity(0.25))
+                Button("quit") {
+                    NSApplication.shared.terminate(nil)
+                }
+                .buttonStyle(.plain)
             }
             .font(.system(size: 12))
             .foregroundStyle(Color.textMuted(colorScheme))
@@ -1051,19 +1107,151 @@ struct PopoverContentView: View {
 
 // MARK: - App
 
-struct ClaudeUsageApp: App {
-    @State private var model = UsageModel()
+/// MenuBarExtra(.window)'s hosting NSPanel is opaque no matter what material/glass is applied
+/// above it — verified via a window-walk diagnostic (its only subview is MenuBarExtraHostingView,
+/// isOpaque/backgroundColor clearing doesn't stick). Owning the NSStatusItem + NSPanel directly
+/// sidesteps that entirely: we set isOpaque/backgroundColor on OUR panel at creation, and an
+/// NSVisualEffectView we add ourselves genuinely blurs the desktop behind it (how real HUD-style
+/// menu bar apps do this).
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let model = UsageModel()
+    private var statusItem: NSStatusItem!
+    private var panel: NSPanel!
+    private var effectView: NSVisualEffectView!
+    private var hostingView: NSHostingView<PopoverContentView>!
+    private var outsideClickMonitor: Any?
+    private var keyMonitor: Any?
 
-    var body: some Scene {
-        MenuBarExtra {
-            PopoverContentView(model: model)
-        } label: {
-            if let image = model.gaugeImage {
-                Image(nsImage: image)
-            } else {
-                Text(model.menuBarTitle).monospacedDigit()
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.button?.action = #selector(statusItemClicked)
+        statusItem.button?.target = self
+        updateStatusButton()
+        observeGaugeChanges()
+
+        panel = makePanel()
+
+        if ProcessInfo.processInfo.environment["TOKENBURN_DEBUG_OPEN"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.showPanel() }
+        }
+    }
+
+    private func makePanel() -> NSPanel {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 600),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .popUpMenu
+        panel.collectionBehavior = [.transient]
+        panel.isReleasedWhenClosed = false
+
+        effectView = NSVisualEffectView()
+        // Dark liquid glass: .hudWindow is Apple's actual dark translucent HUD material — shows
+        // more of the desktop through it than .popover while staying dark. Forcing darkAqua keeps
+        // it dark regardless of the system's light/dark setting (the SwiftUI content's own
+        // colorScheme-driven text colors are unaffected — that's read from the environment
+        // separately, not from this NSAppearance).
+        effectView.appearance = NSAppearance(named: .darkAqua)
+        effectView.material = .hudWindow
+        effectView.blendingMode = .behindWindow
+        effectView.state = .active
+        effectView.wantsLayer = true
+        effectView.layer?.cornerRadius = 16
+        effectView.layer?.masksToBounds = true
+
+        hostingView = NSHostingView(rootView: PopoverContentView(model: model))
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        effectView.addSubview(hostingView)
+        NSLayoutConstraint.activate([
+            hostingView.leadingAnchor.constraint(equalTo: effectView.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: effectView.trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: effectView.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: effectView.bottomAnchor),
+        ])
+
+        panel.contentView = effectView
+        return panel
+    }
+
+    /// @Observable has no Combine/delegate hook outside SwiftUI views — withObservationTracking
+    /// is the supported way to watch it from plain AppKit code; re-register after each fire since
+    /// tracking is one-shot per call.
+    private func observeGaugeChanges() {
+        withObservationTracking {
+            _ = model.gaugeImage
+            _ = model.menuBarTitle
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.updateStatusButton()
+                self?.observeGaugeChanges()
             }
         }
-        .menuBarExtraStyle(.window)
+    }
+
+    private func updateStatusButton() {
+        guard let button = statusItem.button else { return }
+        if let image = model.gaugeImage {
+            button.image = image
+            button.title = ""
+        } else {
+            button.image = nil
+            button.title = model.menuBarTitle
+        }
+    }
+
+    @objc private func statusItemClicked() {
+        if panel.isVisible { hidePanel() } else { showPanel() }
+    }
+
+    private func showPanel() {
+        guard let button = statusItem.button, let buttonWindow = button.window else { return }
+        let buttonFrame = buttonWindow.convertToScreen(button.frame)
+
+        let fitting = hostingView.fittingSize
+        let width = max(fitting.width, 360)
+        let height = fitting.height
+        panel.setContentSize(NSSize(width: width, height: height))
+        panel.setFrameOrigin(NSPoint(x: buttonFrame.midX - width / 2, y: buttonFrame.minY - height - 4))
+
+        panel.makeKeyAndOrderFront(nil)
+        Task { await model.refreshOnPopoverOpen() }
+        startOutsideMonitors()
+    }
+
+    private func hidePanel() {
+        panel.orderOut(nil)
+        stopOutsideMonitors()
+    }
+
+    private func startOutsideMonitors() {
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.hidePanel()
+        }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard event.keyCode == 53 else { return event } // Esc
+            self?.hidePanel()
+            return nil
+        }
+    }
+
+    private func stopOutsideMonitors() {
+        if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        outsideClickMonitor = nil
+        keyMonitor = nil
+    }
+}
+
+struct ClaudeUsageApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
+    var body: some Scene {
+        Settings { EmptyView() }
     }
 }

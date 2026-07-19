@@ -68,10 +68,29 @@ enum CodexCostScanner {
 
     /// Walks one session file: tracks the current model via turn_context, sums token_count
     /// events' last_token_usage (the per-turn delta), buckets by day AND model together.
+    ///
+    /// Events before the first turn_context model marker are buffered, not bucketed immediately:
+    /// verified against real files that sessions never switch models mid-file (0/30 sampled, plus
+    /// 0/376 with >1 distinct model in a broader scan), so pre-marker events are backfilled to
+    /// this file's first-seen model once we know it. Only a file with NO marker anywhere becomes
+    /// "unattributed" (never a per-event "unknown" bucket).
     private static func parseFile(_ url: URL) -> ParseResult {
         guard let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8) else { return ParseResult() }
         var result = ParseResult()
         var currentModel: String?
+        var firstSeenModel: String?
+        var pending: [(day: String, breakdown: TokenBreakdown, tokens: Int64)] = []
+
+        func bucket(day: String, breakdown: TokenBreakdown, tokens: Int64, model: String) {
+            result.tokens += tokens
+            if let usd = costUSD(breakdown, model: model) {
+                result.usd += usd
+            } else {
+                result.allPriced = false
+            }
+            let existing = result.dayModels[day]?[model] ?? TokenBreakdown()
+            result.dayModels[day, default: [:]][model] = existing + breakdown
+        }
 
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard line.contains("turn_context") || line.contains("token_count") else { continue }
@@ -80,31 +99,35 @@ enum CodexCostScanner {
                   let payload = obj["payload"] as? [String: Any] else { continue }
 
             if obj["type"] as? String == "turn_context" {
-                currentModel = payload["model"] as? String
+                if let m = payload["model"] as? String {
+                    currentModel = m
+                    if firstSeenModel == nil { firstSeenModel = m }
+                }
                 continue
             }
             guard payload["type"] as? String == "token_count",
                   let info = payload["info"] as? [String: Any],
                   let last = info["last_token_usage"] as? [String: Any],
                   let totalTokens = (last["total_tokens"] as? NSNumber)?.int64Value else { continue }
+            guard let ts = obj["timestamp"] as? String, let date = parseTimestamp(ts) else { continue }
 
-            let model = currentModel ?? "unknown"
             let breakdown = TokenBreakdown(
                 input: (last["input_tokens"] as? NSNumber)?.int64Value ?? 0,
                 cachedInput: (last["cached_input_tokens"] as? NSNumber)?.int64Value ?? 0,
                 output: (last["output_tokens"] as? NSNumber)?.int64Value ?? 0
             )
-            result.tokens += totalTokens
-            if let usd = costUSD(breakdown, model: model) {
-                result.usd += usd
-            } else {
-                result.allPriced = false
-            }
-
-            guard let ts = obj["timestamp"] as? String, let date = parseTimestamp(ts) else { continue }
             let day = CostScanner.dayFormatter.string(from: date)
-            let existing = result.dayModels[day]?[model] ?? TokenBreakdown()
-            result.dayModels[day, default: [:]][model] = existing + breakdown
+
+            if let currentModel {
+                bucket(day: day, breakdown: breakdown, tokens: totalTokens, model: currentModel)
+            } else {
+                pending.append((day, breakdown, totalTokens))
+            }
+        }
+
+        let backfillModel = firstSeenModel ?? "unattributed"
+        for item in pending {
+            bucket(day: item.day, breakdown: item.breakdown, tokens: item.tokens, model: backfillModel)
         }
         return result
     }
@@ -270,7 +293,13 @@ enum CodexCostScanner {
         let total30d = lastNDayKeys(30, today: today, calendar: calendar).reduce(Int64(0)) { $0 + (dayTotals[$1] ?? 0) }
         let totalAllTime = dayTotals.values.reduce(0, +)
 
-        let byModel = modelTotals.map { ModelTokens(model: $0.key, tokens: $0.value.total, usd: costUSD($0.value, model: $0.key)) }
+        // "unattributed" (a whole file with no model marker at all) is real but rare — hide it
+        // once it's under 1% of the range's tokens so it doesn't clutter the top-4 model list.
+        let byModel = modelTotals
+            .filter { entry in
+                entry.key != "unattributed" || rangeTotalTokens == 0 || Double(entry.value.total) / Double(rangeTotalTokens) >= 0.01
+            }
+            .map { ModelTokens(model: $0.key, tokens: $0.value.total, usd: costUSD($0.value, model: $0.key)) }
             .sorted { $0.tokens > $1.tokens }
         let rangeTotalUSD = allPriced ? modelTotals.reduce(0.0) { $0 + (costUSD($1.value, model: $1.key) ?? 0) } : 0
 
