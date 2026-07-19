@@ -29,4 +29,6 @@ TokenBurn uses the same undocumented usage endpoints the official Claude Code an
 
 ## Screenshots
 
-TODO
+| Limits | Insights |
+|---|---|
+| ![Live Claude and Codex limits with pace tracking](screenshots/limits.png) | ![Spend insights by model](screenshots/insights.png) |
