@@ -432,7 +432,10 @@ final class UsageModel {
 
         let size = MenuBarGaugeView.canvasSize
         let renderer = ImageRenderer(content: MenuBarGaugeView(worst: pct).frame(width: size, height: size))
-        renderer.scale = 2
+        // scale=4 -> 64x64px raster (0.25pt snap grid, half the scale=2 floor) so the per-digit
+        // offset tuning below can actually land sub-0.5pt. NSImage is still declared at `size`
+        // (16x16pt) below, so the menu bar displays it at the same on-screen size either way.
+        renderer.scale = 4
         guard let cgImage = renderer.cgImage else { return }
         let image = NSImage(cgImage: cgImage, size: NSSize(width: size, height: size))
         image.isTemplate = false

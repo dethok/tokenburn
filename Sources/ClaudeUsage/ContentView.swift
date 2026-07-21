@@ -444,17 +444,17 @@ struct MenuBarGaugeView: View {
 
     private var displayText: String { worst >= 100 ? "99+" : "\(worst)" }
 
-    // Per-digit-count ink-centroid correction, measured with a pixel-centroid harness against the
-    // ACTUAL production raster (ImageRenderer scale=2, same as updateGaugeImage() below) — not an
-    // idealized continuous layout, which measures near-centered but doesn't reflect what actually
-    // lands once text gets pixel-snapped onto this tiny 32x32px canvas. The snap lands differently
-    // per digit count, so 1-digit/2-digit/"99+" each need their own x (they share the y nudge for
-    // 1- and 2-digit, but not for "99+").
+    // Per-digit-count ink-centroid correction, measured with the `--gauge-measure` pixel-centroid
+    // harness (main.swift) against the ACTUAL production raster (ImageRenderer scale=4, same as
+    // updateGaugeImage() below) — not an idealized continuous layout, which measures near-centered
+    // but doesn't reflect what actually lands once text gets pixel-snapped onto this 64x64px
+    // canvas. The snap lands differently per digit count, so 1-digit/2-digit/"99+" each need their
+    // own x and y.
     private var digitOffset: (x: CGFloat, y: CGFloat) {
         switch displayText.count {
-        case 1: return (0.5, 1.0)
-        case 2: return (0, 1.0)
-        default: return (1.0, 0.5) // "99+"
+        case 1: return (0.137, 0.383)
+        case 2: return (-0.103, 0.385)
+        default: return (0.768, -0.104) // "99+"
         }
     }
 

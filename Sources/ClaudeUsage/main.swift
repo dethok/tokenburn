@@ -135,4 +135,139 @@ if CommandLine.arguments.contains("--print") {
     exit(exitCode)
 }
 
+// --gauge-measure: renders the real MenuBarGaugeView (same code path + scale as
+// UsageModel.updateGaugeImage()) for the 1-digit/2-digit/"99+" cases and prints, per case, the
+// ring stroke's bounding-box center vs the white digit pixels' centroid, in both px (at the
+// render scale) and pt. Isolates ring vs digit by color/alpha: the track is white at 0.25 alpha
+// and the fill arc is hue-colored (never near-white), so only opaque near-white pixels are the
+// digit — everything else with any ink is the ring. Debug-only, dev tree.
+if CommandLine.arguments.contains("--gauge-measure") {
+    @MainActor
+    func measure(pct: Int) -> (ring: (x: Double, y: Double), digit: (x: Double, y: Double))? {
+        let size = MenuBarGaugeView.canvasSize
+        let renderer = ImageRenderer(content: MenuBarGaugeView(worst: pct).frame(width: size, height: size))
+        renderer.scale = 4
+        guard let cgImage = renderer.cgImage else { return nil }
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+        var ringMinX = Int.max, ringMaxX = Int.min, ringMinY = Int.max, ringMaxY = Int.min
+        var digitSumX = 0.0, digitSumY = 0.0, digitWeight = 0.0
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                guard let c = rep.colorAt(x: x, y: y) else { continue }
+                let a = Double(c.alphaComponent)
+                guard a > 0.04 else { continue } // ~10/255 — skip background
+                // Digit pixels are solid white at varying (antialiased) alpha; the track is
+                // white capped at 0.25 alpha flat. >0.30 alpha safely separates the two, and
+                // weighting the centroid by alpha (not just counting full-opaque pixels) keeps
+                // sub-pixel sensitivity from the antialiased glyph edges.
+                let isDigit = a > 0.30 && c.redComponent > 0.94 && c.greenComponent > 0.94 && c.blueComponent > 0.94
+                if isDigit {
+                    digitSumX += Double(x) * a; digitSumY += Double(y) * a; digitWeight += a
+                } else {
+                    ringMinX = min(ringMinX, x); ringMaxX = max(ringMaxX, x)
+                    ringMinY = min(ringMinY, y); ringMaxY = max(ringMaxY, y)
+                }
+            }
+        }
+        guard digitWeight > 0, ringMinX <= ringMaxX else { return nil }
+        return (ring: (Double(ringMinX + ringMaxX) / 2, Double(ringMinY + ringMaxY) / 2),
+                digit: (digitSumX / digitWeight, digitSumY / digitWeight))
+    }
+    var done = false
+    Task { @MainActor in
+        defer { done = true }
+        for (label, pct) in [("1-digit", 5), ("2-digit", 42), ("99+", 100)] {
+            guard let m = measure(pct: pct) else {
+                print("\(label): measurement failed")
+                continue
+            }
+            let dxPt = (m.digit.x - m.ring.x) / 4.0
+            let dyPt = (m.digit.y - m.ring.y) / 4.0
+            print(String(format: "%@: ring=(%.2f, %.2f)px digit=(%.2f, %.2f)px offset=(%.3f, %.3f)pt",
+                          label, m.ring.x, m.ring.y, m.digit.x, m.digit.y, dxPt, dyPt))
+        }
+    }
+    while !done {
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    exit(0)
+}
+
+// --glass-preview <backdrop.png> <out.png>: offscreen render of the real PopoverContentView
+// (including its live .glassEffect material on macOS 26+) composited over a backdrop image, with
+// no window ever opened. Built to preview Liquid Glass while the screen is locked (screencapture
+// doesn't work there). Debug-only, dev tree — mirrors --print/--selftest's early-exit pattern.
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--glass-preview") {
+    let args = CommandLine.arguments
+    guard args.count > flagIndex + 2 else {
+        FileHandle.standardError.write("usage: --glass-preview <backdrop.png> <out.png>\n".data(using: .utf8)!)
+        exit(1)
+    }
+    let backdropPath = args[flagIndex + 1]
+    let outPath = args[flagIndex + 2]
+    guard let backdropImage = NSImage(contentsOfFile: backdropPath) else {
+        FileHandle.standardError.write("could not load backdrop: \(backdropPath)\n".data(using: .utf8)!)
+        exit(1)
+    }
+
+    // NOTE: a raw DispatchSemaphore.wait() here (the --print/--print-cost pattern) would deadlock —
+    // this Task must be @MainActor (UsageModel/ImageRenderer/PopoverContentView all are), and
+    // MainActor's executor is the main thread's run loop, which a synchronous semaphore-block never
+    // pumps. Pumping RunLoop.main instead lets the MainActor-queued work actually run.
+    var exitCode: Int32 = 0
+    var done = false
+    Task { @MainActor in
+        defer { done = true }
+        let model = UsageModel()
+        // Give the model's own background fetch (kicked off in its init) a brief window to land —
+        // real data is preferred, but the view renders fine with the default empty state too.
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+        let backdropSize = backdropImage.size
+        let content = ZStack {
+            Image(nsImage: backdropImage)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: backdropSize.width, height: backdropSize.height)
+                .clipped()
+            // ponytail: GlassEffectContainer fallback attempt — see report; PopoverContentView's own
+            // .glassEffect (unwrapped) rendered as a total no-op offscreen, testing whether a
+            // container changes that.
+            if #available(macOS 26, *) {
+                GlassEffectContainer {
+                    PopoverContentView(model: model)
+                }
+            } else {
+                PopoverContentView(model: model)
+            }
+        }
+        .frame(width: backdropSize.width, height: backdropSize.height)
+
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = 2
+        guard let cgImage = renderer.cgImage else {
+            FileHandle.standardError.write("render failed — no cgImage\n".data(using: .utf8)!)
+            exitCode = 1
+            return
+        }
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+        guard let png = rep.representation(using: .png, properties: [:]) else {
+            FileHandle.standardError.write("PNG encode failed\n".data(using: .utf8)!)
+            exitCode = 1
+            return
+        }
+        do {
+            try png.write(to: URL(fileURLWithPath: outPath))
+            print("wrote \(outPath) (\(cgImage.width)x\(cgImage.height))")
+        } catch {
+            FileHandle.standardError.write("write failed: \(error)\n".data(using: .utf8)!)
+            exitCode = 1
+        }
+    }
+    while !done {
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    exit(exitCode)
+}
+
 ClaudeUsageApp.main()
