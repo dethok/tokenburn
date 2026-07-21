@@ -457,6 +457,12 @@ struct MenuBarGaugeView: View {
                 .font(.system(size: displayText.count > 2 ? 4.5 : 5.5, weight: .bold))
                 .monospacedDigit()
                 .foregroundStyle(Color.white)
+                // At this font size the system font's line box carries more room above the digits
+                // (space reserved for ascenders/diacritics the glyphs don't use) than below, so
+                // ZStack-centering the Text's frame still reads low against the ring. Verified
+                // against a render with a true center-crosshair; -1pt recenters the ink for both
+                // the 2-digit and "99+" sizes.
+                .offset(y: -1)
         }
         .padding(Self.ringPadding)
         .frame(width: Self.canvasSize, height: Self.canvasSize)
