@@ -86,9 +86,13 @@ func hue(for pct: Int) -> Color {
 /// Bouncy fill-in used by every animated bar/ring (bars, hero ring) — shared so they stay in sync.
 let fillSpring = Animation.spring(duration: 0.35, bounce: 0.35)
 
-/// Dark liquid glass tint over the NSVisualEffectView — tune here if the panel reads too milky
-/// (raise) or too opaque (lower). Kept in the 0.20-0.30 "smoked glass, not frosted" range.
+/// Dark liquid glass tint over the NSVisualEffectView (macOS <26 vibrancy path) — tune here if
+/// the panel reads too milky (raise) or too opaque (lower). Kept in the 0.20-0.30 "smoked glass,
+/// not frosted" range.
 let glassTint: Double = 0.25
+/// Tint for real Liquid Glass on macOS 26+ (applied via Glass.tint(_:)) — lighter than the
+/// vibrancy tint above since the glass material itself already dims what's behind it.
+let glassTintOS26: Double = 0.15
 
 private let hhmmFormatter: DateFormatter = {
     let f = DateFormatter()
@@ -793,12 +797,20 @@ struct PopoverContentView: View {
         }
         .padding(16)
         .frame(width: 360)
-        // Dark liquid glass: the NSVisualEffectView (.hudWindow, forced darkAqua) beneath the
-        // NSHostingView does the actual behind-window blur; this is the ONE tint layer above it
-        // (no .glassEffect, no other .background — those compounded into a heavier, less
-        // transparent look than the VEV alone). AppKit's cornerRadius+masksToBounds on the
-        // effectView already clips this to the panel's rounded corners.
-        .background(Color.black.opacity(glassTint))
+        // Material: on macOS 26+, real Liquid Glass (.glassEffect) is the SOLE material — the
+        // panel skips its NSVisualEffectView entirely on that OS (see AppDelegate.makePanel) so
+        // the two don't stack into a muddy double-blur. On macOS <26: unchanged — the
+        // NSVisualEffectView (.hudWindow, forced darkAqua) beneath the NSHostingView does the
+        // actual behind-window blur; this is the ONE tint layer above it. AppKit's
+        // cornerRadius+masksToBounds on the effectView already clips that path to the panel's
+        // rounded corners; on 26 .glassEffect's own shape does the clipping.
+        .background {
+            if #available(macOS 26, *) {
+                Color.clear.glassEffect(.regular.tint(Color.black.opacity(glassTintOS26)), in: .rect(cornerRadius: 16))
+            } else {
+                Color.black.opacity(glassTint)
+            }
+        }
         .onAppear { Task { await model.refreshOnPopoverOpen() } }
         .task(id: heroRange) { await model.loadInsights(for: heroRange) }
     }
@@ -1182,33 +1194,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.collectionBehavior = [.transient]
         panel.isReleasedWhenClosed = false
 
-        effectView = NSVisualEffectView()
-        // Dark liquid glass: .hudWindow is Apple's actual dark translucent HUD material — shows
-        // more of the desktop through it than .popover while staying dark. Forcing darkAqua keeps
-        // it dark regardless of the system's light/dark setting (the SwiftUI content's own
-        // colorScheme-driven text colors are unaffected — that's read from the environment
-        // separately, not from this NSAppearance).
-        effectView.appearance = NSAppearance(named: .darkAqua)
-        effectView.material = .hudWindow
-        effectView.blendingMode = .behindWindow
-        effectView.state = .active
-        effectView.wantsLayer = true
-        effectView.layer?.cornerRadius = 16
-        effectView.layer?.masksToBounds = true
-
         // ponytail: env-only, screenshot-automation hook — not a user preference, so no UI for it.
         let initialTab: PopoverContentView.Tab = ProcessInfo.processInfo.environment["TOKENBURN_DEBUG_TAB"] == "insights" ? .insights : .limits
         hostingView = NSHostingView(rootView: PopoverContentView(model: model, initialTab: initialTab))
         hostingView.translatesAutoresizingMaskIntoConstraints = false
-        effectView.addSubview(hostingView)
-        NSLayoutConstraint.activate([
-            hostingView.leadingAnchor.constraint(equalTo: effectView.leadingAnchor),
-            hostingView.trailingAnchor.constraint(equalTo: effectView.trailingAnchor),
-            hostingView.topAnchor.constraint(equalTo: effectView.topAnchor),
-            hostingView.bottomAnchor.constraint(equalTo: effectView.bottomAnchor),
-        ])
 
-        panel.contentView = effectView
+        if #available(macOS 26, *) {
+            // Real Liquid Glass (SwiftUI's .glassEffect, applied in PopoverContentView.body) is
+            // the sole material on 26+ — stacking the NSVisualEffectView underneath it double-
+            // blurs into a muddy look, so skip the effect view entirely and host the content
+            // directly. panel.isOpaque=false/backgroundColor=.clear above still lets it show
+            // through.
+            panel.contentView = hostingView
+        } else {
+            effectView = NSVisualEffectView()
+            // Dark liquid glass: .hudWindow is Apple's actual dark translucent HUD material — shows
+            // more of the desktop through it than .popover while staying dark. Forcing darkAqua keeps
+            // it dark regardless of the system's light/dark setting (the SwiftUI content's own
+            // colorScheme-driven text colors are unaffected — that's read from the environment
+            // separately, not from this NSAppearance).
+            effectView.appearance = NSAppearance(named: .darkAqua)
+            effectView.material = .hudWindow
+            effectView.blendingMode = .behindWindow
+            effectView.state = .active
+            effectView.wantsLayer = true
+            effectView.layer?.cornerRadius = 16
+            effectView.layer?.masksToBounds = true
+
+            effectView.addSubview(hostingView)
+            NSLayoutConstraint.activate([
+                hostingView.leadingAnchor.constraint(equalTo: effectView.leadingAnchor),
+                hostingView.trailingAnchor.constraint(equalTo: effectView.trailingAnchor),
+                hostingView.topAnchor.constraint(equalTo: effectView.topAnchor),
+                hostingView.bottomAnchor.constraint(equalTo: effectView.bottomAnchor),
+            ])
+
+            panel.contentView = effectView
+        }
         return panel
     }
 
