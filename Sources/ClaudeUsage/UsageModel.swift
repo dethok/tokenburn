@@ -430,10 +430,11 @@ final class UsageModel {
         guard pct != lastRenderedGaugePct else { return }
         lastRenderedGaugePct = pct
 
-        let renderer = ImageRenderer(content: MenuBarGaugeView(worst: pct).frame(width: 18, height: 18))
+        let size = MenuBarGaugeView.canvasSize
+        let renderer = ImageRenderer(content: MenuBarGaugeView(worst: pct).frame(width: size, height: size))
         renderer.scale = 2
         guard let cgImage = renderer.cgImage else { return }
-        let image = NSImage(cgImage: cgImage, size: NSSize(width: 18, height: 18))
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: size, height: size))
         image.isTemplate = false
         gaugeImage = image
     }

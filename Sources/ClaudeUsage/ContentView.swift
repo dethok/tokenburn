@@ -434,6 +434,14 @@ private struct TabPill: View {
 struct MenuBarGaugeView: View {
     let worst: Int
 
+    /// Render canvas — mirrors the ImageRenderer output size in UsageModel.updateGaugeImage() so
+    /// the two stay in lockstep. 16pt is the tallest height macOS reliably renders unclipped in
+    /// the menu bar.
+    static let canvasSize: CGFloat = 16
+    // 14% margin on every side (ring diameter = 72% of canvasSize) so the stroke's outer edge
+    // never reaches the frame edge — that's what the menu bar was clipping top/bottom.
+    private static let ringPadding: CGFloat = canvasSize * 0.14
+
     private var displayText: String { worst >= 100 ? "99+" : "\(worst)" }
 
     var body: some View {
@@ -443,13 +451,15 @@ struct MenuBarGaugeView: View {
                 .trim(from: 0, to: CGFloat(min(max(worst, 0), 100)) / 100)
                 .stroke(hue(for: worst), style: StrokeStyle(lineWidth: 2, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-            // "99+" needs to shrink slightly to keep clearing the ring at this size.
+            // Scaled down from the old 7/8pt to match the smaller (72%) ring so digits still clear
+            // the stroke; "99+" shrinks further to keep clearing at 3 chars.
             Text(displayText)
-                .font(.system(size: displayText.count > 2 ? 7 : 8, weight: .bold))
+                .font(.system(size: displayText.count > 2 ? 4.5 : 5.5, weight: .bold))
                 .monospacedDigit()
                 .foregroundStyle(Color.white)
         }
-        .frame(width: 18, height: 18)
+        .padding(Self.ringPadding)
+        .frame(width: Self.canvasSize, height: Self.canvasSize)
     }
 }
 
