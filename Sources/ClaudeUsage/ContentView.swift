@@ -444,6 +444,20 @@ struct MenuBarGaugeView: View {
 
     private var displayText: String { worst >= 100 ? "99+" : "\(worst)" }
 
+    // Per-digit-count ink-centroid correction, measured with a pixel-centroid harness against the
+    // ACTUAL production raster (ImageRenderer scale=2, same as updateGaugeImage() below) — not an
+    // idealized continuous layout, which measures near-centered but doesn't reflect what actually
+    // lands once text gets pixel-snapped onto this tiny 32x32px canvas. The snap lands differently
+    // per digit count, so 1-digit/2-digit/"99+" each need their own x (they share the y nudge for
+    // 1- and 2-digit, but not for "99+").
+    private var digitOffset: (x: CGFloat, y: CGFloat) {
+        switch displayText.count {
+        case 1: return (0.5, 1.0)
+        case 2: return (0, 1.0)
+        default: return (1.0, 0.5) // "99+"
+        }
+    }
+
     var body: some View {
         ZStack {
             Circle().stroke(Color.white.opacity(0.25), lineWidth: 2)
@@ -456,13 +470,9 @@ struct MenuBarGaugeView: View {
             Text(displayText)
                 .font(.system(size: displayText.count > 2 ? 4.5 : 5.5, weight: .bold))
                 .monospacedDigit()
+                .multilineTextAlignment(.center)
                 .foregroundStyle(Color.white)
-                // At this font size the system font's line box carries more room above the digits
-                // (space reserved for ascenders/diacritics the glyphs don't use) than below, so
-                // ZStack-centering the Text's frame still reads low against the ring. Verified
-                // against a render with a true center-crosshair; -1pt recenters the ink for both
-                // the 2-digit and "99+" sizes.
-                .offset(y: -1)
+                .offset(x: digitOffset.x, y: digitOffset.y)
         }
         .padding(Self.ringPadding)
         .frame(width: Self.canvasSize, height: Self.canvasSize)
