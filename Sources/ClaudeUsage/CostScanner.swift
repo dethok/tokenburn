@@ -227,11 +227,11 @@ enum CostScanner {
     }
 
     // ponytail: was truncating to the last 2 dash-segments, which mangled deeper project paths
-    // (e.g. "secretary-ai-phase1" -> "ai-phase1") and silently broke hyphen-prefix family
+    // (e.g. "acme-api-phase1" -> "api-phase1") and silently broke hyphen-prefix family
     // clustering below. Root-cause fix: keep the FULL remainder after the home-dir prefix, so a
-    // path like "secretary-ai-staging" still literally starts with "secretary-ai-" and clusters
-    // correctly; deep vault subpaths (e.g. "maximizer-01-Projects-...") likewise still start with
-    // "maximizer-" and cluster under the shorter root name.
+    // path like "acme-api-staging" still literally starts with "acme-api-" and clusters
+    // correctly; deep subpaths (e.g. "notes-01-Projects-...") likewise still start with
+    // "notes-" and cluster under the shorter root name.
     private static func projectShortName(from dirName: String) -> String {
         var name = dirName
         if name.hasPrefix("-") { name.removeFirst() }
