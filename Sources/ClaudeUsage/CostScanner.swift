@@ -242,9 +242,7 @@ enum CostScanner {
 
     // Explicit alias table for known project clusters whose decoded short names don't share a
     // literal hyphen-prefix relationship — extend here as new naming schemes turn up.
-    private static let projectAliases: [String: String] = [
-        "secai": "secretary-ai",
-    ]
+    private static let projectAliases: [String: String] = [:]
 
     private static func aliasedFamily(for shortName: String) -> String {
         for (prefix, family) in projectAliases where shortName == prefix || shortName.hasPrefix(prefix + "-") {
