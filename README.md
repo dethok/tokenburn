@@ -41,3 +41,17 @@ TokenBurn uses the same undocumented usage endpoints the official Claude Code an
 | Limits | Insights |
 |---|---|
 | ![Live Claude and Codex limits with pace tracking](screenshots/limits.png) | ![Spend insights by model](screenshots/insights.png) |
+
+## iPhone widget
+
+A home-screen widget mirroring the app's Limits view: a session ring with pace zone, plus weekly/per-model and Codex bars with pace deltas.
+
+It works via [Scriptable](https://scriptable.app), a free iOS app. On each refresh, the Mac app writes a small snapshot JSON into Scriptable's iCloud folder; Scriptable reads that file and renders the widget. The phone never contacts any API and no data leaves your own iCloud — it's the same numbers already on your Mac, just synced over iCloud Drive.
+
+**Setup:**
+
+1. Install [Scriptable](https://apps.apple.com/app/scriptable/id1405459188) on your iPhone and open it once with iCloud enabled.
+2. Copy `widget/TokenBurn.js` from this repo into iCloud Drive → Scriptable.
+3. Add a Scriptable widget to your home screen and choose the `TokenBurn` script.
+
+Small and medium widget sizes are both supported.

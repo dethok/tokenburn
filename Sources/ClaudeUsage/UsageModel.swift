@@ -312,6 +312,7 @@ final class UsageModel {
     var costUSD: Double?
     var isCostComputing = false
     var todayCostUSD: Double?      // always day-granular (from the 7d range) — the "All" range may bucket by week
+    var codexTodayCostUSD: Double? // set in refreshCost() — see the ponytail note there
 
     // Lazily populated per InsightsRange (only .all is eager, on refreshCost) — each is a cheap
     // in-memory re-aggregation of the already-scanned cache, but still off the main thread since
@@ -373,7 +374,20 @@ final class UsageModel {
         codexInsightsByRange = [:]
         await loadInsights(for: .all)
         todayCostUSD = await Task.detached(priority: .utility) { CostScanner.insights(range: .last7)?.dailyLast30.last?.costUSD }.value
+        // ponytail: CodexCostScanner.Insights.dailyLast30 (DayTokens) carries token counts only —
+        // there is no per-day USD field anywhere in CodexCostScanner (only a range-aggregate
+        // rangeTotalUSD, which isn't "today"). Never invent a dollar figure, so this stays nil
+        // until the scanner grows real per-day USD tracking.
+        codexTodayCostUSD = nil
         isCostComputing = false
+        SnapshotStore.write(
+            claudePlan: claudePlan,
+            codexPlan: codexPlanType,
+            claudeWindows: windows,
+            codexWindows: codexWindows,
+            costTodayClaude: todayCostUSD,
+            costTodayCodex: codexTodayCostUSD
+        )
     }
 
     /// Loads (and caches) the Insights tab's data for one time-range pill. Cheap in-memory
@@ -515,5 +529,13 @@ final class UsageModel {
             EventLog.append(source: "codex", ok: false, detail: "no data")
         }
         updateGaugeImage()
+        SnapshotStore.write(
+            claudePlan: claudePlan,
+            codexPlan: codexPlanType,
+            claudeWindows: windows,
+            codexWindows: codexWindows,
+            costTodayClaude: todayCostUSD,
+            costTodayCodex: codexTodayCostUSD
+        )
     }
 }
