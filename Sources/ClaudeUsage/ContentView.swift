@@ -483,6 +483,7 @@ struct MenuBarGaugeView: View {
 /// with the same spring as the bars.
 private struct HeroRingGauge: View {
     let pct: Int
+    var pacePct: Double? = nil // 0-100, nil = no pace marker (unknown window length)
     @Environment(\.colorScheme) private var colorScheme
     @State private var animatedPct: Int = 0
     private var color: Color { hue(for: pct) }
@@ -499,19 +500,55 @@ private struct HeroRingGauge: View {
             .baselineOffset(8)
     }
 
-    var body: some View {
+    // Pace-zone colors mirror HatchOverlay / BarView's pace tick — same scheme-aware opacities.
+    private var paceArcColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.28) : Color.black.opacity(0.25)
+    }
+    private var paceTickColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.35) : Color.black.opacity(0.30)
+    }
+
+    @ViewBuilder
+    private var ring: some View {
         ZStack {
             Circle().stroke(Color.hairline(colorScheme), lineWidth: 7)
+            // Dashed pace arc — only when under pace; static (final pct, not animatedPct), same
+            // as BarView's pace hatch/tick (see comment at line ~259).
+            if let pacePct, pacePct > Double(pct) + 1 {
+                Circle()
+                    .trim(from: CGFloat(pct) / 100, to: CGFloat(min(pacePct, 100)) / 100)
+                    .stroke(paceArcColor, style: StrokeStyle(lineWidth: 5, dash: [1.2, 1.8]))
+                    .rotationEffect(.degrees(-90))
+            }
             Circle()
                 .trim(from: 0, to: CGFloat(min(max(animatedPct, 0), 100)) / 100)
                 .stroke(color, style: StrokeStyle(lineWidth: 7, lineCap: .round))
                 .rotationEffect(.degrees(-90))
+            // Radial tick at the pace point — offset-then-rotate orbits it around the ZStack
+            // center; ring path radius is 32.
+            if let pacePct, pacePct > 1, pacePct < 99 {
+                Rectangle()
+                    .fill(paceTickColor)
+                    .frame(width: 1.5, height: 11)
+                    .offset(y: -32)
+                    .rotationEffect(.degrees(pacePct / 100 * 360))
+            }
             Text("\(numeral)\(percentSign)")
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .foregroundStyle(color)
                 .contentTransition(.numericText(value: Double(pct)))
                 .animation(.default, value: pct)
+        }
+    }
+
+    var body: some View {
+        Group {
+            if pacePct != nil {
+                ring.help(paceTooltip(windowDays: 5.0 / 24.0))
+            } else {
+                ring
+            }
         }
         .frame(width: 64, height: 64)
         .onAppear {
@@ -960,7 +997,7 @@ struct PopoverContentView: View {
                 .foregroundStyle(Color.textMuted(colorScheme))
             if let w = heroRingWindow {
                 let pct = Int(w.utilization.rounded())
-                HeroRingGauge(pct: pct)
+                HeroRingGauge(pct: pct, pacePct: sessionWindow != nil ? expectedPct(resetsAt: w.resetsAt, windowDays: 5.0 / 24.0) : nil)
                 // "NN% left" merged into the reset line; ETA line below — relocated here from the
                 // now-removed full-width session row (redundant with this ring). Verified real
                 // word-wrap: worst case "100% left · resets 23:59 · in 23h 59m" needs exactly 2
